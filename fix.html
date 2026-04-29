@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <title>OnyxLink Manifest Fix</title>
+  <style>
+    body { font-family: system-ui; background:#0f1115; color:#e7e9ee; padding:30px; max-width:600px; margin:0 auto; }
+    button { background:#3b82f6; color:white; border:none; padding:12px 22px; border-radius:8px; font-size:14px; cursor:pointer; font-weight:600; }
+    .log { margin-top:20px; background:#181b22; border:1px solid #2a2f3a; border-radius:8px; padding:14px; font-family:ui-monospace,monospace; font-size:12px; min-height:120px; direction:ltr; }
+    .log div { margin:2px 0; }
+    .ok { color:#22c55e; }
+    .err { color:#ef4444; }
+  </style>
+</head>
+<body>
+  <h2>OnyxLink Manifest Fix</h2>
+  <p>اختر المجلد الذي يحتوي على الإضافة (الخطوة التالية ستفتح نافذة المجلد، اختر <code>onyxlink/extension</code>).</p>
+  <button id="go">اختر مجلد الإضافة</button>
+  <div class="log" id="log"></div>
+  <script>
+    const $log = document.getElementById('log');
+    function log(t, c){ const d=document.createElement('div'); if(c) d.className=c; d.textContent=t; $log.appendChild(d); }
+    document.getElementById('go').onclick = async () => {
+      try {
+        log('فتح نافذة اختيار المجلد...');
+        const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+        log('Folder: ' + dir.name);
+        const fh = await dir.getFileHandle('manifest.json');
+        const f = await fh.getFile();
+        const text = await f.text();
+        log('Read manifest.json (' + text.length + ' bytes)');
+        const obj = JSON.parse(text);
+        if (!('default_locale' in obj)) {
+          log('Already fixed — no default_locale found.', 'ok');
+          return;
+        }
+        delete obj.default_locale;
+        const out = JSON.stringify(obj, null, 2) + '\n';
+        const w = await fh.createWritable();
+        await w.write(out);
+        await w.close();
+        log('✓ Removed default_locale and saved.', 'ok');
+        log('Now go back to chrome://extensions/ and click "Load unpacked" again.', 'ok');
+      } catch (e) {
+        log('Error: ' + (e?.message ?? e), 'err');
+      }
+    };
+  </script>
+</body>
+</html>
