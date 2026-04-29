@@ -84,16 +84,28 @@
       $log.scrollTop = $log.scrollHeight;
     }
 
-    async function loadJSZip() {
-      if (window.JSZip) return;
-      log('Loading JSZip…', 'muted');
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load JSZip CDN'));
-        document.head.appendChild(s);
+    async function ghFetch(url, pat) {
+      const resp = await fetch(url, {
+        headers: {
+          'Authorization': 'Bearer ' + pat,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
       });
+      if (!resp.ok) {
+        const text = await resp.text();
+        const err = new Error(`HTTP ${resp.status} ${resp.statusText} from ${url}: ${text.slice(0, 200)}`);
+        err.status = resp.status;
+        throw err;
+      }
+      return resp.json();
+    }
+
+    function b64ToBytes(b64) {
+      const bin = atob(b64.replace(/\s+/g, ''));
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
     }
 
     async function install() {
@@ -123,59 +135,60 @@
       }
 
       try {
-        log(`Fetching ${repo}@${branch} zipball…`, 'muted');
-        const zipUrl = `https://api.github.com/repos/${repo}/zipball/${branch}`;
-        const resp = await fetch(zipUrl, {
-          headers: {
-            'Authorization': 'Bearer ' + pat,
-            'Accept': 'application/vnd.github+json',
-          },
-        });
-        if (!resp.ok) {
-          log(`HTTP ${resp.status} ${resp.statusText} from ${zipUrl}`, 'err');
-          const text = await resp.text();
-          log(text.slice(0, 500), 'err');
-          $btn.disabled = false;
-          return;
-        }
-        const blob = await resp.blob();
-        log(`Downloaded ${(blob.size / 1024).toFixed(1)} KB.`, 'ok');
+        // 1. Resolve branch to commit sha (so the tree fetch is stable mid-install).
+        log(`Resolving ${repo}@${branch}…`, 'muted');
+        const branchInfo = await ghFetch(`https://api.github.com/repos/${repo}/branches/${branch}`, pat);
+        const treeSha = branchInfo.commit?.commit?.tree?.sha;
+        if (!treeSha) throw new Error('No tree sha found in branch info.');
 
-        await loadJSZip();
-        const zip = await JSZip.loadAsync(blob);
-        const allEntries = Object.values(zip.files);
+        // 2. List all files (recursive tree).
+        log(`Fetching tree ${treeSha.slice(0, 7)}…`, 'muted');
+        const tree = await ghFetch(`https://api.github.com/repos/${repo}/git/trees/${treeSha}?recursive=1`, pat);
+        if (tree.truncated) log('Warning: tree was truncated by GitHub (very large repo).', 'err');
+        const blobs = tree.tree.filter(e => e.type === 'blob');
+        log(`Found ${blobs.length} files. Downloading…`);
 
-        // GitHub zipballs have a top-level "owner-repo-sha/" folder. Strip it.
-        let topPrefix = '';
-        for (const e of allEntries) {
-          const idx = e.name.indexOf('/');
-          if (idx >= 0) { topPrefix = e.name.slice(0, idx + 1); break; }
-        }
-        log(`Stripping top-level prefix: ${topPrefix}`, 'muted');
-
-        const fileEntries = allEntries.filter(e => !e.dir && e.name.startsWith(topPrefix) && e.name.length > topPrefix.length);
-        log(`Writing ${fileEntries.length} files…`);
-
+        // 3. Fetch each blob and write it. Parallelize a few at a time to stay polite.
+        const concurrency = 4;
         let written = 0;
-        for (const entry of fileEntries) {
-          const relPath = entry.name.slice(topPrefix.length);
-          const parts = relPath.split('/');
-          let cur = dirHandle;
-          for (let i = 0; i < parts.length - 1; i++) {
-            cur = await cur.getDirectoryHandle(parts[i], { create: true });
+        let failed = 0;
+
+        async function processBlob(blob) {
+          try {
+            const data = await ghFetch(blob.url, pat);
+            const bytes = data.encoding === 'base64' ? b64ToBytes(data.content) : new TextEncoder().encode(data.content ?? '');
+            const parts = blob.path.split('/');
+            let cur = dirHandle;
+            for (let i = 0; i < parts.length - 1; i++) {
+              cur = await cur.getDirectoryHandle(parts[i], { create: true });
+            }
+            const fileHandle = await cur.getFileHandle(parts[parts.length - 1], { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(bytes);
+            await writable.close();
+            written++;
+            log(`  ✓ ${blob.path} (${bytes.length} B)`, 'ok');
+          } catch (e) {
+            failed++;
+            log(`  ✗ ${blob.path}: ${e.message ?? e}`, 'err');
           }
-          const fileName = parts[parts.length - 1];
-          const fileHandle = await cur.getFileHandle(fileName, { create: true });
-          const writable = await fileHandle.createWritable();
-          const fileBlob = await entry.async('blob');
-          await writable.write(fileBlob);
-          await writable.close();
-          written++;
-          log(`  ✓ ${relPath}`, 'ok');
         }
+
+        // Worker pool.
+        const queue = blobs.slice();
+        await Promise.all(Array.from({ length: concurrency }, async () => {
+          while (queue.length) {
+            const blob = queue.shift();
+            if (blob) await processBlob(blob);
+          }
+        }));
 
         log('', '');
-        log(`Done. ${written} files written into "${dirHandle.name}".`, 'ok');
+        if (failed === 0) {
+          log(`Done. ${written} files written into "${dirHandle.name}".`, 'ok');
+        } else {
+          log(`${written} files written, ${failed} failed.`, 'err');
+        }
         document.getElementById('ext-path').textContent = `${dirHandle.name}/extension`;
         $next.classList.add('shown');
       } catch (e) {
