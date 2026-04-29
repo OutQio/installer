@@ -201,12 +201,26 @@
 
     document.getElementById('install').addEventListener('click', install);
 
-    // Optional: prefill PAT from URL fragment "#pat=..." (cleared right after).
+    // Prefill the PAT from one of (in order): URL fragment, then localStorage.
+    // Each successful install also stores the PAT to localStorage so reopening
+    // the installer for a future update does not require re-typing it.
+    const STORAGE_KEY = 'onyxlink-pat-v1';
+    const $pat = document.getElementById('pat');
     if (location.hash.startsWith('#pat=')) {
       const v = decodeURIComponent(location.hash.slice(5));
-      document.getElementById('pat').value = v;
+      $pat.value = v;
+      try { localStorage.setItem(STORAGE_KEY, v); } catch {}
       history.replaceState(null, '', location.pathname + location.search);
+    } else {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) $pat.value = saved;
+      } catch {}
     }
+    // Keep storage in sync if the user edits the field manually.
+    $pat.addEventListener('change', () => {
+      try { localStorage.setItem(STORAGE_KEY, $pat.value.trim()); } catch {}
+    });
   </script>
 </body>
 </html>
