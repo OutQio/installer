@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OnyxLink Installer</title>
+  <style>
+    :root {
+      --bg: #0f1115; --fg: #e7e9ee; --fg-muted: #9aa3b2;
+      --accent: #3b82f6; --success: #22c55e; --danger: #ef4444; --border: #2a2f3a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+    .page { max-width: 720px; margin: 0 auto; padding: 28px 22px; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p.lede { margin: 0 0 20px; color: var(--fg-muted); font-size: 13px; line-height: 1.5; }
+    .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+    .field label { font-size: 12px; font-weight: 600; }
+    .field input { background: #181b22; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
+    .field input:focus { outline: none; border-color: var(--accent); }
+    .field small { font-size: 11px; color: var(--fg-muted); }
+    button.primary { background: var(--accent); color: white; border: 1px solid var(--accent); padding: 10px 18px; border-radius: 6px; font-size: 14px; cursor: pointer; font-family: inherit; font-weight: 600; }
+    button.primary:hover { filter: brightness(1.1); }
+    button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .log { margin-top: 24px; background: #181b22; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; max-height: 360px; overflow: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; direction: ltr; text-align: left; }
+    .log .line { white-space: pre-wrap; word-break: break-all; }
+    .log .line.ok { color: var(--success); }
+    .log .line.err { color: var(--danger); }
+    .log .line.muted { color: var(--fg-muted); }
+    .next-steps { margin-top: 18px; background: #182032; border: 1px solid var(--accent); border-radius: 8px; padding: 14px; font-size: 13px; line-height: 1.6; display: none; }
+    .next-steps.shown { display: block; }
+    .next-steps ol { margin: 8px 0 0 0; padding-inline-start: 22px; }
+    code { background: #20242d; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>OnyxLink Installer</h1>
+    <p class="lede">يقوم هذا الإعداد بنسخ ملفات الإضافة من المستودع الخاص إلى مجلد تختاره. ثم اتبع الخطوات التالية لتفعيلها في Chrome.</p>
+
+    <div class="field">
+      <label for="pat">GitHub Personal Access Token</label>
+      <input id="pat" type="password" autocomplete="off" placeholder="github_pat_..." />
+      <small>الرمز يُستخدم لمرة واحدة فقط لجلب المستودع الخاص. لا يُحفظ في أي مكان.</small>
+    </div>
+
+    <div class="field">
+      <label for="repo">Repository</label>
+      <input id="repo" type="text" value="OutQio/onyxlink-boost" />
+    </div>
+
+    <div class="field">
+      <label for="branch">Branch</label>
+      <input id="branch" type="text" value="main" />
+    </div>
+
+    <button id="install" class="primary" type="button">اختر مجلد التثبيت وابدأ</button>
+
+    <div class="log" id="log"></div>
+
+    <div class="next-steps" id="next-steps">
+      <strong>الإضافة جاهزة. الخطوات التالية:</strong>
+      <ol>
+        <li>افتح <code>chrome://extensions/</code> في هذا المتصفح.</li>
+        <li>فعّل <strong>Developer mode</strong> من أعلى اليمين.</li>
+        <li>اضغط <strong>Load unpacked</strong>.</li>
+        <li>اختر المجلد <code id="ext-path">extension</code> داخل المجلد الذي اخترته.</li>
+        <li>ثبّت الإضافة من أيقونة الألغاز في شريط الأدوات.</li>
+        <li>افتح <code>http://mserver:8085/OrderSync</code> ثم اضغط أيقونة الإضافة لفتح اللوحة الجانبية.</li>
+      </ol>
+    </div>
+  </div>
+
+  <script>
+    const $log = document.getElementById('log');
+    const $btn = document.getElementById('install');
+    const $next = document.getElementById('next-steps');
+
+    function log(text, cls) {
+      const div = document.createElement('div');
+      div.className = 'line' + (cls ? ' ' + cls : '');
+      div.textContent = text;
+      $log.appendChild(div);
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    async function loadJSZip() {
+      if (window.JSZip) return;
+      log('Loading JSZip…', 'muted');
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Failed to load JSZip CDN'));
+        document.head.appendChild(s);
+      });
+    }
+
+    async function install() {
+      const pat = document.getElementById('pat').value.trim();
+      const repo = document.getElementById('repo').value.trim();
+      const branch = document.getElementById('branch').value.trim() || 'main';
+
+      if (!pat) { log('Error: PAT is required.', 'err'); return; }
+      if (!repo.includes('/')) { log('Error: Repo must be like owner/name.', 'err'); return; }
+      if (!('showDirectoryPicker' in window)) {
+        log('Error: This browser does not support File System Access API.', 'err');
+        log('Use Chrome 86+ (or Edge 86+).', 'err');
+        return;
+      }
+
+      $btn.disabled = true;
+
+      let dirHandle;
+      try {
+        log('Opening folder picker…', 'muted');
+        dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        log('Target folder: ' + dirHandle.name, 'ok');
+      } catch (e) {
+        log('Folder picker cancelled.', 'err');
+        $btn.disabled = false;
+        return;
+      }
+
+      try {
+        log(`Fetching ${repo}@${branch} zipball…`, 'muted');
+        const zipUrl = `https://api.github.com/repos/${repo}/zipball/${branch}`;
+        const resp = await fetch(zipUrl, {
+          headers: {
+            'Authorization': 'Bearer ' + pat,
+            'Accept': 'application/vnd.github+json',
+          },
+        });
+        if (!resp.ok) {
+          log(`HTTP ${resp.status} ${resp.statusText} from ${zipUrl}`, 'err');
+          const text = await resp.text();
+          log(text.slice(0, 500), 'err');
+          $btn.disabled = false;
+          return;
+        }
+        const blob = await resp.blob();
+        log(`Downloaded ${(blob.size / 1024).toFixed(1)} KB.`, 'ok');
+
+        await loadJSZip();
+        const zip = await JSZip.loadAsync(blob);
+        const allEntries = Object.values(zip.files);
+
+        // GitHub zipballs have a top-level "owner-repo-sha/" folder. Strip it.
+        let topPrefix = '';
+        for (const e of allEntries) {
+          const idx = e.name.indexOf('/');
+          if (idx >= 0) { topPrefix = e.name.slice(0, idx + 1); break; }
+        }
+        log(`Stripping top-level prefix: ${topPrefix}`, 'muted');
+
+        const fileEntries = allEntries.filter(e => !e.dir && e.name.startsWith(topPrefix) && e.name.length > topPrefix.length);
+        log(`Writing ${fileEntries.length} files…`);
+
+        let written = 0;
+        for (const entry of fileEntries) {
+          const relPath = entry.name.slice(topPrefix.length);
+          const parts = relPath.split('/');
+          let cur = dirHandle;
+          for (let i = 0; i < parts.length - 1; i++) {
+            cur = await cur.getDirectoryHandle(parts[i], { create: true });
+          }
+          const fileName = parts[parts.length - 1];
+          const fileHandle = await cur.getFileHandle(fileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          const fileBlob = await entry.async('blob');
+          await writable.write(fileBlob);
+          await writable.close();
+          written++;
+          log(`  ✓ ${relPath}`, 'ok');
+        }
+
+        log('', '');
+        log(`Done. ${written} files written into "${dirHandle.name}".`, 'ok');
+        document.getElementById('ext-path').textContent = `${dirHandle.name}/extension`;
+        $next.classList.add('shown');
+      } catch (e) {
+        log('Install failed: ' + (e?.message ?? String(e)), 'err');
+        console.error(e);
+      } finally {
+        $btn.disabled = false;
+      }
+    }
+
+    document.getElementById('install').addEventListener('click', install);
+
+    // Optional: prefill PAT from URL fragment "#pat=..." (cleared right after).
+    if (location.hash.startsWith('#pat=')) {
+      const v = decodeURIComponent(location.hash.slice(5));
+      document.getElementById('pat').value = v;
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  </script>
+</body>
+</html>
